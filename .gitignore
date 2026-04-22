@@ -132,3 +132,7 @@ cython_debug/
 
 # VS Code settings
 .vscode/
+
+# Cursor settings
+.cursor/
+session.*

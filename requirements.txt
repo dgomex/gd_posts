@@ -1,4 +1,4 @@
 telethon>=1.43
 python-dotenv>=1.0
 google-genai>=1.73
-PyYAML>=6.0
+litellm>=1.50

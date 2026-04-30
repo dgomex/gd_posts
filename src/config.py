@@ -25,6 +25,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 LLMProvider = Literal["google_genai", "openai", "ollama", "ollama_cloud"]
 
 
+def _empty_str_to_none(v: object) -> object:
+    """pydantic-settings reads empty env vars as "" — treat them as unset."""
+    if isinstance(v, str) and v.strip() == "":
+        return None
+    return v
+
+
 class LLMConfig(BaseModel):
     """Provider-agnostic configuration for a single chat model."""
 
@@ -37,10 +44,25 @@ class LLMConfig(BaseModel):
     @field_validator("base_url", "api_key", mode="before")
     @classmethod
     def _empty_to_none(cls, v: object) -> object:
-        # pydantic-settings reads empty env vars as "" — treat them as unset.
-        if isinstance(v, str) and v.strip() == "":
-            return None
-        return v
+        return _empty_str_to_none(v)
+
+
+class ResearchConfig(BaseModel):
+    """Configuration for the Gemini Deep Research agent.
+
+    If ``api_key`` is unset, the ``google-genai`` SDK falls back to the
+    ``GEMINI_API_KEY`` / ``GOOGLE_API_KEY`` environment variables.
+    """
+
+    agent: str = "deep-research-pro-preview-12-2025"
+    api_key: Optional[str] = None
+    poll_interval_s: float = Field(default=5.0, gt=0.0)
+    max_wait_s: float = Field(default=1800.0, gt=0.0)
+
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def _empty_to_none(cls, v: object) -> object:
+        return _empty_str_to_none(v)
 
 
 class Settings(BaseSettings):
@@ -66,6 +88,10 @@ class Settings(BaseSettings):
     judge: LLMConfig = Field(
         default_factory=lambda: LLMConfig(temperature=0.2),
         description="LLM that reviews drafts and emits structured feedback.",
+    )
+    research: ResearchConfig = Field(
+        default_factory=ResearchConfig,
+        description="Gemini Deep Research agent settings (RESEARCH__*).",
     )
 
     max_iterations: int = Field(

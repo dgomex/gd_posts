@@ -140,4 +140,4 @@ cython_debug/
 session.*
 
 # Output
-research.md
+outputs/*

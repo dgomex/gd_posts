@@ -1,4 +1,4 @@
-"""CLI entry point: read a source file, run the writer/judge loop, print the post."""
+"""CLI entry point: research a topic, run the writer/judge loop, print the post."""
 
 from __future__ import annotations
 
@@ -16,22 +16,28 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="gd-posts",
         description=(
-            "Generate a blog post from a source file via an LLM writer/judge loop. "
-            "The writer drafts the post; the judge reviews up to N times. "
-            "If the judge approves, the post is printed; otherwise the last draft "
-            "is printed with the final feedback."
+            "Generate a blog post about a topic using a Gemini Deep Research "
+            "report as input, then iterating with an LLM writer/judge loop. "
+            "If the judge approves, the post is printed; otherwise the last "
+            "draft is printed alongside the final feedback."
         ),
     )
     parser.add_argument(
-        "input",
-        type=Path,
-        help="Path to the source file to write a post about.",
+        "topic",
+        type=str,
+        help="The topic Deep Research should investigate.",
     )
     parser.add_argument(
         "-o", "--output",
         type=Path,
         default=None,
-        help="Optional output file. Prints to stdout if omitted.",
+        help="Optional output file for the final post. Prints to stdout if omitted.",
+    )
+    parser.add_argument(
+        "--save-report",
+        type=Path,
+        default=None,
+        help="Optional path to also save the raw Deep Research report.",
     )
     parser.add_argument(
         "--max-iterations",
@@ -45,35 +51,37 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_args(argv)
 
-    if not args.input.exists():
-        print(f"Error: input file not found: {args.input}", file=sys.stderr)
+    topic = args.topic.strip()
+    if not topic:
+        print("Error: topic must not be empty.", file=sys.stderr)
         return 1
 
     settings = get_settings()
     if args.max_iterations is not None:
         settings.max_iterations = args.max_iterations
 
-    source_content = args.input.read_text(encoding="utf-8")
-    if not source_content.strip():
-        print(f"Error: input file is empty: {args.input}", file=sys.stderr)
-        return 1
-
     app = build_graph(settings)
 
     initial_state = PostState(
-        source_content=source_content,
+        topic=topic,
         max_iterations=settings.max_iterations,
     )
 
     print(
-        f"[gd-posts] writer={settings.writer.provider}:{settings.writer.model} "
+        f"[gd-posts] researcher={settings.research.agent} "
+        f"writer={settings.writer.provider}:{settings.writer.model} "
         f"judge={settings.judge.provider}:{settings.judge.model} "
         f"max_iterations={settings.max_iterations}",
         file=sys.stderr,
     )
+    print(f"[gd-posts] topic: {topic}", file=sys.stderr)
 
     result = app.invoke(initial_state)
     final_state = result if isinstance(result, PostState) else PostState.model_validate(result)
+
+    if args.save_report and final_state.source_content:
+        args.save_report.write_text(final_state.source_content, encoding="utf-8")
+        print(f"[gd-posts] Wrote research report to {args.save_report}", file=sys.stderr)
 
     last_fb = final_state.last_judgement
     if last_fb is not None:

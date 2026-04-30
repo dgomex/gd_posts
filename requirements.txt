@@ -7,6 +7,9 @@ langchain-google-genai>=2.0.0,<3
 langchain-openai>=0.2.0,<1
 langchain-ollama>=0.2.0,<1
 
+# Gemini Deep Research (Interactions API)
+google-genai>=1.55.0,<2
+
 # Settings & validation
 pydantic>=2.6.0,<3
 pydantic-settings>=2.2.0,<3

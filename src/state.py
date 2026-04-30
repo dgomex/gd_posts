@@ -28,9 +28,10 @@ class JudgeFeedback(BaseModel):
 class PostState(BaseModel):
     """Shared state passed between LangGraph nodes."""
 
-    source_content: str
+    topic: str
     max_iterations: int = 3
 
+    source_content: str = ""
     draft: str = ""
     iteration: int = 0
     feedback_history: list[JudgeFeedback] = Field(default_factory=list)

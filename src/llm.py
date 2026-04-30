@@ -1,28 +1,70 @@
-from litellm import completion
+"""LLM factory: build a LangChain chat model from an LLMConfig.
 
-import os
+Adding a new provider is as simple as appending a branch here. Provider
+imports are lazy so users only need to install the SDKs they actually use.
+"""
 
-class LLM:
-    def __init__(self, model, system_prompt):
-        self.base_url = os.getenv("LLM_BASE_URL") or "https://ollama.com"
-        self.model = model
-        self.system_prompt = system_prompt
-        self.temperature = 0.7
+from __future__ import annotations
 
-    def text_complete(self, prompt):
-        print(f"[llm] sending prompt")
-        response = completion(model=self.model, messages=[{"role": "system", "content": self.system_prompt}, {"role": "user", "content": prompt}], base_url=self.base_url, temperature=self.temperature)
-        print(f"[llm] response received")
-        msg = getattr(response.choices[0], "message", None)
-        content = getattr(msg, "content", None) if msg else None
-        if isinstance(content, str):
-            return content.strip()
-        if isinstance(content, list):
-            parts: list[str] = []
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    parts.append(str(block.get("text", "")))
-                elif hasattr(block, "text"):
-                    parts.append(str(getattr(block, "text", "") or ""))
-            return "\n".join(parts).strip()
-        return str(content or "").strip()
+from langchain_core.language_models import BaseChatModel
+
+from .config import LLMConfig
+
+
+def make_llm(config: LLMConfig) -> BaseChatModel:
+    """Instantiate a chat model for the given provider configuration.
+
+    Supported providers:
+        * ``google_genai``  — Google Gemini via ``langchain-google-genai``.
+        * ``openai``        — OpenAI or any OpenAI-compatible API
+                              (set ``base_url`` to point elsewhere).
+        * ``ollama``        — Ollama server, defaults to localhost.
+        * ``ollama_cloud``  — Ollama Cloud at ``https://ollama.com``;
+                              ``api_key`` is sent as a Bearer token.
+    """
+    provider = config.provider
+
+    if provider == "google_genai":
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        kwargs: dict = {"model": config.model, "temperature": config.temperature}
+        if config.api_key:
+            kwargs["google_api_key"] = config.api_key
+        return ChatGoogleGenerativeAI(**kwargs)
+
+    if provider == "openai":
+        from langchain_openai import ChatOpenAI
+
+        kwargs = {"model": config.model, "temperature": config.temperature}
+        if config.api_key:
+            kwargs["api_key"] = config.api_key
+        if config.base_url:
+            kwargs["base_url"] = config.base_url
+        return ChatOpenAI(**kwargs)
+
+    if provider in ("ollama", "ollama_cloud"):
+        from langchain_ollama import ChatOllama
+
+        if config.base_url:
+            base_url = config.base_url
+        elif provider == "ollama_cloud":
+            base_url = "https://ollama.com"
+        else:
+            base_url = "http://localhost:11434"
+
+        # Ollama Cloud authenticates with a Bearer token; for self-hosted
+        # Ollama the api_key is usually unset and headers stay empty.
+        client_kwargs: dict = {}
+        if config.api_key:
+            client_kwargs["headers"] = {
+                "Authorization": f"Bearer {config.api_key}",
+            }
+
+        return ChatOllama(
+            model=config.model,
+            temperature=config.temperature,
+            base_url=base_url,
+            client_kwargs=client_kwargs or None,
+        )
+
+    raise ValueError(f"Unsupported LLM provider: {provider!r}")

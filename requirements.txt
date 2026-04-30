@@ -1,4 +1,12 @@
-telethon>=1.43
-python-dotenv>=1.0
-google-genai>=1.73
-litellm>=1.50
+# Orchestration
+langgraph>=0.2.50,<0.7
+langchain-core>=0.3.0,<0.4
+
+# LLM providers (lazy-imported in src/llm.py)
+langchain-google-genai>=2.0.0,<3
+langchain-openai>=0.2.0,<1
+langchain-ollama>=0.2.0,<1
+
+# Settings & validation
+pydantic>=2.6.0,<3
+pydantic-settings>=2.2.0,<3

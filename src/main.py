@@ -1,60 +1,99 @@
-from dotenv import load_dotenv
-from gemini import Gemini
-from llm import LLM
-from telegram import Telegram
+"""CLI entry point: read a source file, run the writer/judge loop, print the post."""
+
+from __future__ import annotations
+
+import argparse
+import sys
 from pathlib import Path
+from typing import Optional, Sequence
 
-import os
-import asyncio
+from .config import get_settings
+from .graph import build_graph
+from .state import PostState
 
-PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
+
+def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="gd-posts",
+        description=(
+            "Generate a blog post from a source file via an LLM writer/judge loop. "
+            "The writer drafts the post; the judge reviews up to N times. "
+            "If the judge approves, the post is printed; otherwise the last draft "
+            "is printed with the final feedback."
+        ),
+    )
+    parser.add_argument(
+        "input",
+        type=Path,
+        help="Path to the source file to write a post about.",
+    )
+    parser.add_argument(
+        "-o", "--output",
+        type=Path,
+        default=None,
+        help="Optional output file. Prints to stdout if omitted.",
+    )
+    parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=None,
+        help="Override MAX_ITERATIONS (default: 3).",
+    )
+    return parser.parse_args(argv)
 
 
-async def main():
-    load_dotenv()
-    async with Telegram(
-        api_id=os.getenv("API_ID"),
-        api_hash=os.getenv("API_HASH"),
-        group=os.getenv("GROUP"),
-    ) as telegram:
-        topic, message_id = await telegram.get_latest_message()
-        print(f"[pipeline]Topic: {topic}")
-        #await telegram.reply("Hello, world!", message_id)
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = _parse_args(argv)
 
-    gemini = Gemini(api_key=os.getenv("GEMINI_API_KEY"))
-    research = gemini.run_deep_research(
-        prompt_txt_path=PROMPTS_DIR / "deep_research.txt",
-        topic=topic,
-        agent=os.getenv("GEMINI_DEEP_RESEARCH_AGENT") or "deep-research-pro-preview-12-2025",
+    if not args.input.exists():
+        print(f"Error: input file not found: {args.input}", file=sys.stderr)
+        return 1
+
+    settings = get_settings()
+    if args.max_iterations is not None:
+        settings.max_iterations = args.max_iterations
+
+    source_content = args.input.read_text(encoding="utf-8")
+    if not source_content.strip():
+        print(f"Error: input file is empty: {args.input}", file=sys.stderr)
+        return 1
+
+    app = build_graph(settings)
+
+    initial_state = PostState(
+        source_content=source_content,
+        max_iterations=settings.max_iterations,
     )
 
-    judge_response = ""
+    print(
+        f"[gd-posts] writer={settings.writer.provider}:{settings.writer.model} "
+        f"judge={settings.judge.provider}:{settings.judge.model} "
+        f"max_iterations={settings.max_iterations}",
+        file=sys.stderr,
+    )
 
-    for attempt in range(0, 5):
-        print(f"[pipeline] Attempt {attempt + 1}:")
-        print(f"[pipeline] Generating blog post...")
-        if attempt == 0:
-            blog_writer_prompt_path = PROMPTS_DIR/"blog_writer.txt"
-            blog_writer = LLM(model="gemma3:4b-cloud", system_prompt=blog_writer_prompt_path.read_text(encoding="utf-8"))
-            blog_writer_response = blog_writer.text_complete(prompt=f"Write a blog post about {topic} based on the following research: {research}")
-        else:
-            blog_writer = LLM(model="gemma3:4b-cloud", system_prompt="Rewrite the blog post based on the recommendations from the judge.")
-            blog_writer_response = blog_writer.text_complete(prompt=f"Blog post: {blog_writer_response}. Recommendations from the judge: {judge_response}")
-        
-        print(f"[pipeline] Judging blog post...")
-        judge_prompt_path = PROMPTS_DIR/"judge.txt"
-        judge = LLM(model="gemma3:4b-cloud", system_prompt=judge_prompt_path.read_text(encoding="utf-8"))
-        judge_response = judge.text_complete(prompt=f"The blog post is: {blog_writer_response}")
-        
-        print(f"[pipeline] Judge response: {judge_response}")
-        
-        if judge_response.lower() == "approved":
-            print("[pipeline] Blog post approved")
-            print(f"[pipeline] Blog post: {blog_writer_response}")
-            break
-        else:
-            print("[pipeline] Blog post not approved")
-    
+    result = app.invoke(initial_state)
+    final_state = result if isinstance(result, PostState) else PostState.model_validate(result)
+
+    last_fb = final_state.last_judgement
+    if last_fb is not None:
+        status = "APPROVED" if last_fb.approved else "REJECTED (max rounds reached)"
+        print(
+            f"\n[gd-posts] {status} after {final_state.iteration} round(s)\n"
+            f"[gd-posts] Final score: {last_fb.score}/10\n"
+            f"[gd-posts] Final feedback: {last_fb.feedback}\n",
+            file=sys.stderr,
+        )
+
+    post = final_state.final_post or final_state.draft
+    if args.output:
+        args.output.write_text(post, encoding="utf-8")
+        print(f"[gd-posts] Wrote post to {args.output}", file=sys.stderr)
+    else:
+        print(post)
+
+    return 0
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(main())

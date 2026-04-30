@@ -1,46 +1,177 @@
-# Telegram → Gemini Deep Research → LiteLLM blog → judge
+# gd_posts
 
-The pipeline reads the **latest message** in a Telegram group or channel (used as the **research topic**; the chat should have at least one message), runs **Gemini Deep Research** with instructions from [`prompts/deep_research.txt`](prompts/deep_research.txt), then uses **LiteLLM** to draft and refine a blog post for up to **five** attempts. On each attempt it calls a **writer** and a **judge** with system prompts from [`prompts/blog_writer.txt`](prompts/blog_writer.txt) and [`prompts/judge.txt`](prompts/judge.txt). The loop stops when the judge’s reply is exactly **`approved`** (compared case-insensitively). The final post is **printed to the console**; sending anything back to Telegram is left commented out in the code.
+Turn any source file into a polished blog post using a small **LangGraph**
+workflow with two LLMs:
 
-Writer and judge both use the **`LLM`** class in [`src/llm.py`](src/llm.py) (`litellm.completion` with a system and user message). The model id is currently hardcoded in [`src/main.py`](src/main.py) as **`gemma3:4b-cloud`** against **`LLM_BASE_URL`** (default `https://ollama.com`).
+1. **Writer** drafts a Markdown post from the source content.
+2. **Judge** reviews the draft and returns a structured `JudgeFeedback`
+   (`approved`, `score`, `feedback`).
+3. If the judge approves, the post is printed.
+   Otherwise the draft is sent back to the writer with the feedback, up to
+   `MAX_ITERATIONS` times (default **3**). After the final round the last
+   draft is returned along with the rejection feedback.
+
+```text
+        ┌──────────┐      ┌──────────┐
+ ──►──►─│  writer  │─►───►│  judge   │──── approve / give_up ──► finalize ──► END
+        └──────────┘      └──────────┘
+              ▲                 │
+              │                 │
+              └──── rewrite ────┘
+```
+
+Both LLMs are configured **independently** through environment variables, so
+you can mix providers freely (e.g. a strong writer on Ollama Cloud, a cheap
+judge on Gemini Flash).
+
+## Stack
+
+- [LangGraph](https://langchain-ai.github.io/langgraph/) for the writer/judge
+  control flow.
+- [Pydantic](https://docs.pydantic.dev/) for the workflow state and the
+  structured judge response.
+- [pydantic-settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/)
+  for environment-driven configuration.
+- LangChain provider integrations for Gemini, OpenAI, and Ollama
+  (incl. Ollama Cloud).
+
+## Project layout
+
+```text
+gd_posts/
+├── prompts/
+│   ├── writer.txt        # System prompt for the writer LLM
+│   └── judge.txt         # System prompt for the judge LLM
+├── src/
+│   ├── config.py         # Pydantic settings (WRITER__* / JUDGE__*)
+│   ├── llm.py            # Factory: provider → LangChain chat model
+│   ├── state.py          # PostState + JudgeFeedback Pydantic models
+│   ├── nodes.py          # writer / judge / finalize / decide_next
+│   ├── graph.py          # LangGraph wiring
+│   └── main.py           # CLI entry point
+├── .env.example
+├── requirements.txt
+└── README.md
+```
 
 ## Setup
 
-1. Create Telegram API credentials: https://my.telegram.org/apps
-2. Copy `.env.example` to `.env` and fill in at least **Telegram** (`API_ID`, `API_HASH`, `GROUP`) and **Gemini** (`GEMINI_API_KEY` or `GOOGLE_API_KEY`). For Ollama Cloud–style models, set **`OLLAMA_API_KEY`** (or whatever your provider expects; see [LiteLLM docs](https://docs.litellm.ai/docs/)).
-3. Install dependencies **inside a virtual environment**:
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+# edit .env with your API keys
+```
 
-   ```sh
-   cd /path/to/gd_posts
-   python3 -m venv .venv
-   .venv/bin/pip install -r requirements.txt
-   ```
+## Configuration
 
-4. Run from the repository root:
+Settings are loaded from the environment (or a local `.env`) via
+`pydantic-settings`. The writer and judge are configured independently using
+the `WRITER__*` / `JUDGE__*` nested-env-var convention:
 
-   ```sh
-   .venv/bin/python src/main.py
-   ```
+| Variable                | Description                                       |
+| ----------------------- | ------------------------------------------------- |
+| `WRITER__PROVIDER`      | `google_genai` \| `openai` \| `ollama` \| `ollama_cloud` |
+| `WRITER__MODEL`         | Model name for the chosen provider                |
+| `WRITER__API_KEY`       | API key (optional if provider reads its own env)  |
+| `WRITER__BASE_URL`      | Override host (OpenAI-compatible / self-hosted)   |
+| `WRITER__TEMPERATURE`   | Sampling temperature (default `0.8`)              |
+| `JUDGE__*`              | Same fields, used for the judge LLM               |
+| `MAX_ITERATIONS`        | Max writer/judge rounds (default `3`, max `10`)   |
 
-   On first run, Telethon will prompt you to sign in and will create a **`session.session`** file next to the process current working directory (the client is named `session` in code). Run from the repo root consistently so that file path stays predictable, or adjust [`src/telegram.py`](src/telegram.py) if you want a fixed path.
+### Switching providers
 
-## Environment variables
+You only need to change a few env vars. Examples:
 
-See [`.env.example`](.env.example) for the full list. In short:
+**Gemini (default)**
+```dotenv
+WRITER__PROVIDER=google_genai
+WRITER__MODEL=gemini-2.0-flash
+WRITER__API_KEY=AIza...
+```
 
-| Variable | Role |
-|----------|------|
-| `API_ID`, `API_HASH`, `GROUP` | Telethon: app credentials and numeric chat id |
-| `GEMINI_API_KEY` or `GOOGLE_API_KEY` | Google GenAI client for Deep Research |
-| `GEMINI_DEEP_RESEARCH_AGENT` | Optional; defaults to `deep-research-pro-preview-12-2025` in code |
-| `LLM_BASE_URL` | Optional; default `https://ollama.com` for LiteLLM |
+**OpenAI**
+```dotenv
+WRITER__PROVIDER=openai
+WRITER__MODEL=gpt-4o-mini
+WRITER__API_KEY=sk-...
+```
 
-## Repository layout
+**Ollama Cloud** — uses `https://ollama.com` and sends the API key as a Bearer
+token via the underlying `ollama` client headers:
+```dotenv
+WRITER__PROVIDER=ollama_cloud
+WRITER__MODEL=gpt-oss:120b-cloud
+WRITER__API_KEY=your-ollama-cloud-key
+```
 
-| Path | Purpose |
-|------|---------|
-| `src/main.py` | Async entrypoint: Telegram → research → writer/judge loop |
-| `src/telegram.py` | Telethon client: latest group message, optional send/reply helpers |
-| `src/gemini.py` | `google.genai` client and Deep Research polling |
-| `src/llm.py` | Thin LiteLLM wrapper (`text_complete`) |
-| `prompts/*.txt` | Editable instructions for deep research, blog writer, and judge |
+**Local Ollama**
+```dotenv
+WRITER__PROVIDER=ollama
+WRITER__MODEL=llama3.1
+WRITER__BASE_URL=http://localhost:11434
+```
+
+**Any OpenAI-compatible API** (vLLM, LM Studio, Together AI, etc.):
+```dotenv
+WRITER__PROVIDER=openai
+WRITER__MODEL=meta-llama/Llama-3.1-70B-Instruct
+WRITER__BASE_URL=https://api.together.xyz/v1
+WRITER__API_KEY=your-key
+```
+
+You can also mix and match — e.g. a powerful writer on Ollama Cloud and a
+fast, cheap Gemini judge:
+```dotenv
+WRITER__PROVIDER=ollama_cloud
+WRITER__MODEL=gpt-oss:120b-cloud
+WRITER__API_KEY=your-ollama-cloud-key
+
+JUDGE__PROVIDER=google_genai
+JUDGE__MODEL=gemini-2.0-flash
+JUDGE__API_KEY=AIza...
+```
+
+### Adding another provider
+
+Open `src/llm.py` and add a new branch in `make_llm`. The factory only needs
+to return any `BaseChatModel` — the rest of the workflow is provider-agnostic.
+
+## Usage
+
+```bash
+python -m src.main path/to/source.md
+```
+
+Write the result to a file instead of stdout:
+
+```bash
+python -m src.main path/to/source.md -o post.md
+```
+
+Override the iteration cap for a single run:
+
+```bash
+python -m src.main path/to/source.md --max-iterations 5
+```
+
+The CLI prints the writer/judge configuration and the final score / feedback
+on `stderr`, and the post itself on `stdout` (or to `-o` if specified). This
+makes it easy to pipe the output:
+
+```bash
+python -m src.main notes.md > post.md
+```
+
+## How the loop works
+
+- `writer` reads the source content, the previous draft, and **all prior
+  reviewer feedback**, and produces the next Markdown draft.
+- `judge` evaluates the draft against the source and returns a strict
+  `JudgeFeedback` via `with_structured_output(JudgeFeedback)`.
+- `decide_next` routes to `finalize` (approval), `finalize` (max rounds
+  reached), or back to `writer` (rewrite).
+- `finalize` copies the current draft into `final_post` and the graph ends.
+
+The full feedback history is passed back to the writer on every rewrite, so
+the model has full context on what has already been criticised.

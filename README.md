@@ -1,30 +1,40 @@
 # gd_posts
 
-Turn any **topic** into a polished blog post using a small **LangGraph**
-workflow with three stages:
-
-1. **Researcher** — runs Gemini Deep Research on the topic and returns a
-   structured, citation-rich report that becomes the `source_content`.
-2. **Writer** — drafts a Markdown post from the research report.
-3. **Judge** — reviews the draft and returns a structured `JudgeFeedback`
-   (`approved`, `score`, `feedback`).
-
-If the judge approves, the post is printed. Otherwise the draft is sent back
-to the writer with the feedback, up to `MAX_ITERATIONS` times (default
-**3**). After the final round the last draft is returned along with the
-rejection feedback.
+A Telegram-driven blog-post agent. Topics are read from a Telegram group, the
+agent runs a small **LangGraph** workflow over them, and a status reply is
+posted back. Approved posts are saved to `outputs/`.
 
 ```text
-   ┌────────────┐    ┌──────────┐    ┌──────────┐
- ──│ researcher ├───►│  writer  ├───►│  judge   ├── approve / give_up ──► finalize ──► END
+        Telegram group                   outputs/<ts>-<slug>.md
+              │                                    ▲
+              ▼                                    │
+   ┌────────────┐    ┌──────────┐    ┌──────────┐  │
+ ──│ researcher ├───►│  writer  ├───►│  judge   ├──┴── approve / give_up ──► finalize ──► reply
    └────────────┘    └──────────┘    └──────────┘
                           ▲                 │
                           │                 │
                           └──── rewrite ────┘
 ```
 
+The pipeline:
+
+1. **Trigger** — single-shot reads the group's latest message, or `--watch`
+   subscribes to every new message in the group.
+2. **Researcher** — runs Gemini Deep Research on the topic and returns a
+   structured, citation-rich report that becomes the `source_content`.
+3. **Writer** — drafts a Markdown post from the research report.
+4. **Judge** — reviews the draft and returns a structured `JudgeFeedback`
+   (`approved`, `score`, `feedback`).
+5. **Loop** — if rejected, the writer rewrites with the feedback, up to
+   `MAX_ITERATIONS` times (default **3**).
+6. **Reply** — the orchestrator sends a Telegram reply to the original
+   message: `Agent Feedback: Post Created` (judge approved) or
+   `Agent Feedback: Post Failed to Be Created` (rejection or exception).
+7. **Save** — approved posts are written to
+   `outputs/<UTC timestamp>-<slug>.md`.
+
 The three LLMs are configured **independently** through environment
-variables, so you can mix providers freely (e.g. Deep Research from Google,
+variables, so you can mix providers freely (e.g. Deep Research on Google,
 a strong writer on Ollama Cloud, a cheap judge on Gemini Flash).
 
 ## Stack
@@ -39,6 +49,8 @@ a strong writer on Ollama Cloud, a cheap judge on Gemini Flash).
   (incl. Ollama Cloud) for the writer/judge.
 - [`google-genai`](https://github.com/googleapis/python-genai) Interactions
   API for the Deep Research agent.
+- [Telethon](https://docs.telethon.dev/) (MTProto user account) for the
+  Telegram trigger and replies.
 
 ## Project layout
 
@@ -49,13 +61,15 @@ gd_posts/
 │   ├── writer.txt        # System prompt for the writer LLM
 │   └── judge.txt         # System prompt for the judge LLM
 ├── src/
-│   ├── config.py         # Pydantic settings (WRITER__* / JUDGE__* / RESEARCH__*)
+│   ├── config.py         # Pydantic settings (WRITER__*, JUDGE__*, RESEARCH__*, TELEGRAM__*)
 │   ├── llm.py            # Factory: provider → LangChain chat model
 │   ├── researcher.py     # Deep Research client + LangGraph node
+│   ├── telegram_io.py    # Telethon wrapper: fetch_latest / iter_new_messages / send_reply
 │   ├── state.py          # PostState + JudgeFeedback Pydantic models
 │   ├── nodes.py          # writer / judge / finalize / decide_next
 │   ├── graph.py          # LangGraph wiring
-│   └── main.py           # CLI entry point
+│   └── main.py           # CLI entry point + async orchestrator
+├── outputs/              # Approved posts (gitignored)
 ├── .env.example
 ├── requirements.txt
 └── README.md
@@ -70,12 +84,39 @@ cp .env.example .env
 # edit .env with your API keys
 ```
 
+## Telegram setup
+
+The trigger uses a Telethon **user account** (MTProto), not a bot, so it can
+read every message in a group without admin/privacy-mode rituals.
+
+1. Go to [my.telegram.org/apps](https://my.telegram.org/apps), sign in with
+   your Telegram account, and create an app to get `api_id` and `api_hash`.
+2. Find the numeric ID of the group you want the agent to monitor (Telegram
+   supergroups usually look like `-100…`). Tools like
+   [@username_to_id_bot](https://t.me/username_to_id_bot) can help.
+3. Fill these in your `.env`:
+
+   ```dotenv
+   TELEGRAM__API_ID=12345678
+   TELEGRAM__API_HASH=your-api-hash
+   TELEGRAM__GROUP=-1001234567890
+   # TELEGRAM__SESSION_PATH=session   # default: ./session(.session)
+   ```
+
+4. The **first run is interactive** — Telethon will prompt for the phone
+   number and a verification code in the terminal, then write the session to
+   `TELEGRAM__SESSION_PATH` (covered by `.gitignore` as `session.*`).
+   Subsequent runs are silent.
+
+The user account must be a member of the configured group, and the message
+the agent processes is replied to in-place.
+
 ## Configuration
 
 Settings are loaded from the environment (or a local `.env`) via
-`pydantic-settings`. The writer, judge, and research agent are configured
-independently using the `WRITER__*` / `JUDGE__*` / `RESEARCH__*`
-nested-env-var convention:
+`pydantic-settings`. The writer, judge, research agent, and Telegram client
+are configured independently using the `WRITER__*` / `JUDGE__*` /
+`RESEARCH__*` / `TELEGRAM__*` nested-env-var convention:
 
 | Variable                    | Description                                       |
 | --------------------------- | ------------------------------------------------- |
@@ -89,6 +130,10 @@ nested-env-var convention:
 | `RESEARCH__API_KEY`         | Gemini key. Falls back to `GEMINI_API_KEY` / `GOOGLE_API_KEY` |
 | `RESEARCH__POLL_INTERVAL_S` | Polling interval while research is in flight (default `5.0`) |
 | `RESEARCH__MAX_WAIT_S`      | Hard timeout for a research run (default `1800`)  |
+| `TELEGRAM__API_ID`          | Telethon `api_id` (integer) from my.telegram.org/apps |
+| `TELEGRAM__API_HASH`        | Telethon `api_hash`                               |
+| `TELEGRAM__GROUP`           | Numeric chat ID of the target group               |
+| `TELEGRAM__SESSION_PATH`    | Session file prefix (default `session`)           |
 | `MAX_ITERATIONS`            | Max writer/judge rounds (default `3`, max `10`)   |
 
 ### Switching writer / judge providers
@@ -151,35 +196,50 @@ to return any `BaseChatModel` — the rest of the workflow is provider-agnostic.
 
 ## Usage
 
+**Single-shot** — fetches the most recent message in the group, runs the
+graph once, replies, and exits:
+
 ```bash
-python -m src.main "history of Google TPUs"
+python -m src.main
 ```
 
-Write the result to a file instead of stdout:
+Optionally save the raw Deep Research report alongside the post (single-shot
+only):
 
 ```bash
-python -m src.main "history of Google TPUs" -o post.md
-```
-
-Save the raw Deep Research report alongside the post:
-
-```bash
-python -m src.main "history of Google TPUs" -o post.md --save-report report.md
+python -m src.main --save-report report.md
 ```
 
 Override the iteration cap for a single run:
 
 ```bash
-python -m src.main "history of Google TPUs" --max-iterations 5
+python -m src.main --max-iterations 5
 ```
 
-The CLI prints the configuration, Deep Research progress, and the final
-score / feedback on `stderr`, and the post itself on `stdout` (or to `-o` if
-specified). This makes it easy to pipe the output:
+**Watcher** — keeps the Telethon connection open and processes every new
+message in the group as it arrives. Triggers are queued internally, so a
+message that arrives while the agent is mid-run waits its turn:
 
 ```bash
-python -m src.main "history of Google TPUs" > post.md
+python -m src.main --watch
 ```
+
+Press `Ctrl+C` to stop the watcher.
+
+### Outputs and replies
+
+- Approved posts are written to `outputs/<UTC timestamp>-<slug>.md` (e.g.
+  `outputs/20260430T184612Z-history-of-google-tpus.md`). The `outputs/`
+  directory is created on demand and is gitignored.
+- The Telegram reply is always one of:
+  - `Agent Feedback: Post Created` — judge approved the final draft.
+  - `Agent Feedback: Post Failed to Be Created` — judge rejected after
+    `MAX_ITERATIONS`, or the pipeline raised (Deep Research timeout, LLM
+    provider error, etc.). In watcher mode the loop continues to the next
+    message regardless.
+
+The CLI prints configuration, Deep Research progress, the writer/judge
+verdict, and the saved-post path on `stderr`.
 
 ## Deep Research notes
 
@@ -210,3 +270,7 @@ python -m src.main "history of Google TPUs" > post.md
 
 The full feedback history is passed back to the writer on every rewrite, so
 the model has full context on what has already been criticised.
+
+The graph itself is fully decoupled from Telegram; the orchestrator in
+[`src/main.py`](src/main.py) reads from `TelegramListener`, runs `app.invoke`
+in a worker thread, then sends the reply and saves the post.

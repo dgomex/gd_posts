@@ -65,6 +65,33 @@ class ResearchConfig(BaseModel):
         return _empty_str_to_none(v)
 
 
+class TelegramConfig(BaseModel):
+    """Telethon (MTProto user account) credentials and target group.
+
+    All credential fields default to ``None`` so the rest of the application
+    can load even when Telegram isn't configured. Use ``is_configured()`` at
+    the orchestration layer before connecting.
+    """
+
+    api_id: Optional[int] = None
+    api_hash: Optional[str] = None
+    group: Optional[int] = None
+    session_path: Path = Path("session")
+
+    @field_validator("api_hash", mode="before")
+    @classmethod
+    def _empty_to_none(cls, v: object) -> object:
+        return _empty_str_to_none(v)
+
+    def is_configured(self) -> bool:
+        """True when all required credentials are present."""
+        return (
+            self.api_id is not None
+            and bool(self.api_hash)
+            and self.group is not None
+        )
+
+
 class Settings(BaseSettings):
     """Top-level app settings.
 
@@ -92,6 +119,10 @@ class Settings(BaseSettings):
     research: ResearchConfig = Field(
         default_factory=ResearchConfig,
         description="Gemini Deep Research agent settings (RESEARCH__*).",
+    )
+    telegram: TelegramConfig = Field(
+        default_factory=TelegramConfig,
+        description="Telegram (Telethon) trigger settings (TELEGRAM__*).",
     )
 
     max_iterations: int = Field(
